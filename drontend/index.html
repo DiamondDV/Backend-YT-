@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="en" class="light">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>YouTube Downloader</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.development.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script>
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    colors: {
+                        "light-bg": "#F0F4F8",
+                        "light-text": "#1E293B",
+                        "light-card": "rgba(255,255,255,0.4)",
+                        "light-border": "rgba(255,255,255,0.9)",
+                        "light-primary": "#38BDF8",
+                        "light-primary-hover": "#0EA5E9",
+                        "dark-bg": "#0F172A",
+                        "dark-text": "#E2E8F0",
+                        "dark-card": "rgba(30,41,59,0.4)",
+                        "dark-border": "rgba(51,65,85,0.9)",
+                        "dark-primary": "#38BDF8",
+                        "dark-primary-hover": "#7DD3FC"
+                    },
+                    boxShadow: { glass: "0 4px 30px rgba(0,0,0,0.1)" },
+                }
+            }
+        };
+    </script>
+    <style>
+        @keyframes slideUp {
+            from { transform: translateY(100px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        .slide-up {
+            animation: slideUp 0.6s ease forwards;
+        }
+
+        @keyframes fadePopup {
+            from { opacity: 0; transform: scale(0.9); }
+            to { opacity: 1; transform: scale(1); }
+        }
+        /* Applied to the download modal backdrop */
+        .popup {
+            animation: fadePopup 0.3s ease forwards;
+        }
+        
+        /* Ensures the status text doesn't cause layout shift */
+        .status-text-height {
+            min-height: 20px;
+        }
+    </style>
+</head>
+<body class="bg-light-bg dark:bg-dark-bg text-light-text dark:text-dark-text transition-colors duration-300">
+    <div class="absolute top-0 left-0 w-full h-full bg-gradient-to-br from-sky-200 via-rose-200 to-lime-200 dark:from-sky-900/40 dark:via-rose-900/40 dark:to-lime-900/40 blur-3xl opacity-60"></div>
+    <div id="root" class="relative z-10"></div>
+    
+    <script type="text/babel">
+        const { useState, useRef } = React;
+        const ReactDOM = window.ReactDOM;
+
+        // Status messages to cycle through for aesthetic loading
+        const statusMessages = [
+            "Establishing secure connection...",
+            "Analyzing stream parameters...",
+            "Fetching video data chunks...",
+            "Synchronizing audio and video buffers...",
+            "Merging streams (demuxing data)...",
+            "Applying post-processing filters...",
+            "Finalizing file integrity check...",
+            "Preparing file for download..."
+        ];
+
+        // ---------------- ICONS ----------------
+        // Loader component updated to accept size and style props
+        const Loader = ({ className = "h-10 w-10", p = "p-8" }) => (
+            <div className={`flex justify-center items-center ${p}`}>
+                <svg className={`animate-spin ${className} text-light-primary dark:text-dark-primary`} viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" className="opacity-25" />
+                    <path fill="currentColor" className="opacity-75" d="M4 12a8 8 0 018-8V0C5.3 0 0 5.3 0 12h4z" />
+                </svg>
+            </div>
+        );
+
+        // ------------ NORMALIZE URL ----------------
+        const normalizeYouTubeUrl = (url) => {
+            try {
+                let cleaned = url.split("&")[0].split("?si")[0];
+                let idMatch = cleaned.match(/(?:v=|youtu\.be\/|shorts\/|embed\/)([^#?&]+)/);
+                if (!idMatch) return null;
+                return `https://www.youtube.com/watch?v=${idMatch[1]}`;
+            } catch { return null; }
+        };
+
+        // ------------ FORMAT CARD ----------------
+        function FormatCard({ format, onDownload }) {
+            const label = format.quality || `${format.bitrate} kbps`;
+
+            return (
+                <div className="p-4 bg-light-bg/50 dark:bg-dark-bg/50 rounded-lg flex items-center justify-between">
+                    <div>
+                        <div className="font-semibold">{label}</div>
+                        <div className="text-xs opacity-60">{format.container.toUpperCase()}</div>
+                    </div>
+
+                    <button
+                        onClick={() => onDownload(format)}
+                        className="px-4 py-2 bg-light-primary hover:bg-light-primary-hover 
+                                        dark:bg-dark-primary dark:hover:bg-dark-primary-hover 
+                                        text-white font-bold rounded-md">
+                        Download
+                    </button>
+                </div>
+            );
+        }
+
+        // ---------------- MAIN APP ----------------
+        function App() {
+            const [url, setUrl] = useState("");
+            const [videoInfo, setVideoInfo] = useState(null);
+            const [loading, setLoading] = useState(false);
+            const [error, setError] = useState("");
+            
+            // New Download Modal States
+            const [isDownloading, setIsDownloading] = useState(false);
+            const [downloadStatus, setDownloadStatus] = useState(statusMessages[0]);
+            const [isHighQuality, setIsHighQuality] = useState(false);
+            const statusIntervalRef = useRef(null);
+
+            // ↓↓ SLIDE ANIMATION CONTROL ↓↓
+            const [boxMovedUp, setBoxMovedUp] = useState(false);
+            
+            // ------------- STATUS CYCLING LOGIC ----------------
+            const startStatusCycling = (highQuality) => {
+                setIsDownloading(true);
+                setIsHighQuality(highQuality);
+
+                let index = 0;
+                setDownloadStatus(statusMessages[0]);
+
+                if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
+
+                statusIntervalRef.current = setInterval(() => {
+                    index = (index + 1) % statusMessages.length;
+                    setDownloadStatus(statusMessages[index]);
+                }, 2500); // Cycle every 2.5 seconds
+            };
+
+            const stopStatusCycling = () => {
+                if (statusIntervalRef.current) {
+                    clearInterval(statusIntervalRef.current);
+                    statusIntervalRef.current = null;
+                }
+                setIsDownloading(false);
+                setDownloadStatus(statusMessages[0]);
+                setIsHighQuality(false);
+            };
+
+            // ------------- FETCH VIDEO INFO ----------------
+            async function handleFetch() {
+                setError("");
+                setVideoInfo(null);
+
+                const cleaned = normalizeYouTubeUrl(url);
+                if (!cleaned) return setError("Invalid YouTube URL");
+
+                setLoading(true);
+
+                try {
+                    const res = await fetch(`http://localhost:4000/api/info?url=${encodeURIComponent(cleaned)}`);
+                    const data = await res.json();
+                    if (!res.ok) throw new Error(data.error || "Server error");
+                    
+                    // Filter audio formats to ensure only one is shown in the card for simplicity
+                    // The first item is assumed to be the best for merging
+                    data.formats.audio = data.formats.audio.slice(0, 1);
+                    
+                    setVideoInfo(data);
+                    setBoxMovedUp(true);
+                } catch (e) {
+                    setError(e.message);
+                }
+
+                setLoading(false);
+            }
+
+            // ------------- DOWNLOAD ----------------
+            async function handleDownload(format) {
+                const type = format.bitrate ? "audio" : "video";
+                
+                // Get the video height or 0 if audio
+                const heightMatch = format.quality ? format.quality.match(/(\d+)p/) : null;
+                const height = heightMatch ? parseInt(heightMatch[1], 10) : 0;
+                
+                const isHQ = height >= 1440; // 1440p or 2160p (4K)
+
+                // 1. Show the custom modal and start cycling
+                startStatusCycling(isHQ);
+
+                const audioItag = type === "video" 
+                    ? (videoInfo.formats.audio[0]?.itag || "bestaudio") // Assuming 'itag' is the correct property for merging
+                    : '';
+
+                const downloadUrl =
+                    `http://localhost:4000/api/download` +
+                    `?url=${encodeURIComponent(url)}` +
+                    `&itag=${format.itag}` +
+                    `&type=${type}` +
+                    `&audio_itag=${audioItag}`;
+
+                // Use the iframe trick for downloading
+                const iframe = document.createElement("iframe");
+                iframe.style.display = "none";
+                iframe.src = downloadUrl;
+                document.body.appendChild(iframe);
+
+                // Set a realistic (simulated) duration for the processing/download
+                const processingDuration = isHQ ? 30000 : 15000; // 30 seconds for HQ, 15 for others
+                
+                // 2. Stop cycling, show final message, and remove the iframe after the simulated duration
+                setTimeout(() => {
+                    // Stop the cycling but keep the modal open temporarily
+                    if (statusIntervalRef.current) clearInterval(statusIntervalRef.current);
+                    
+                    // Set a brief final status before closing the modal
+                    setDownloadStatus("✅ Processing complete! Your browser should now be saving the file.");
+                    
+                    // Wait a moment (1.5s) for the user to see the completion message, then hide modal
+                    setTimeout(() => {
+                        stopStatusCycling(); // This will reset state and hide the modal
+                        
+                        // *** FIX: DO NOT REMOVE THE IFRAME! ***
+                        // Removing the iframe prematurely can cancel the download in the browser.
+                        // We will let the browser handle the cleanup of the hidden iframe after the file is saved.
+                        // document.body.removeChild(iframe); // <-- REMOVED THIS LINE
+                    }, 1500);
+                    
+                }, processingDuration);
+            }
+
+            return (
+                <div className="min-h-screen flex flex-col items-center justify-center p-4">
+
+                    {/* Aesthetic Download Modal */}
+                    {isDownloading && (
+                        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm popup">
+                            <div className="bg-light-card dark:bg-dark-card backdrop-blur-xl p-8 rounded-2xl shadow-2xl max-w-sm w-11/12 text-center border-t-4 border-light-primary dark:border-dark-primary">
+                                
+                                <Loader className="h-8 w-8" p="p-0" />
+                                
+                                <h2 className="text-xl font-bold mt-4">Download in Progress...</h2>
+                                
+                                {/* Cycling Status Text */}
+                                <p className="text-sm font-medium opacity-80 my-4 h-5 status-text-height transition-all duration-300">
+                                    {downloadStatus}
+                                </p>
+
+                                {/* Conditional High Quality Warning */}
+                                {isHighQuality && (
+                                    <p className="text-xs text-red-500 font-semibold mt-4 bg-red-500/10 p-2 rounded">
+                                        ⚠️ Woah, that's a huge file! Processing might take a few extra moments.
+                                    </p>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                    
+                    {/* Main Box */}
+                    <div
+                        className={`
+                            w-full max-w-2xl bg-light-card dark:bg-dark-card backdrop-blur-xl
+                            rounded-2xl shadow-glass p-6 border border-light-border dark:border-dark-border
+                            transition-all duration-700
+                            ${boxMovedUp ? "translate-y-[-120px]" : "translate-y-[0]"}
+                        `}
+                    >
+                        <h1 className="text-3xl font-bold text-center">YouTube Downloader</h1>
+                        <p className="opacity-70 text-center mt-1">Paste a YouTube link.</p>
+
+                        <div className="mt-6 flex gap-2">
+                            <input
+                                className="w-full px-4 py-3 bg-light-bg/50 dark:bg-dark-bg/50 rounded-lg"
+                                placeholder="https://youtube.com/watch?v=..."
+                                value={url}
+                                onChange={(e) => setUrl(e.target.value)}
+                                onKeyDown={(e) => e.key === "Enter" && handleFetch()}
+                            />
+                            <button
+                                onClick={handleFetch}
+                                className="px-6 py-3 bg-light-primary hover:bg-light-primary-hover
+                                            dark:bg-dark-primary dark:hover:bg-dark-primary-hover
+                                            text-white rounded-lg font-bold">
+                                Fetch
+                            </button>
+                        </div>
+                    </div>
+
+                    {loading && <Loader />}
+                    {error && <div className="mt-4 p-4 bg-red-500/20 text-red-800 rounded-lg">{error}</div>}
+
+                    {/* RESULTS */}
+                    {videoInfo && (
+                        <div className="slide-up w-full max-w-3xl mt-10 p-6 bg-light-card dark:bg-dark-card rounded-2xl shadow-glass border border-light-border dark:border-dark-border">
+
+                            <div className="flex items-center gap-4">
+                                <img src={videoInfo.thumbnail} className="w-40 rounded-lg shadow" />
+                                <h2 className="text-xl font-bold">{videoInfo.title}</h2>
+                            </div>
+
+                            <h3 className="text-lg font-semibold mt-6 mb-3">Video</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {videoInfo.formats.video.map((f) => (
+                                    <FormatCard key={f.itag} format={f} onDownload={handleDownload} />
+                                ))}
+                            </div>
+
+                            <h3 className="text-lg font-semibold mt-6 mb-3">Audio</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                {videoInfo.formats.audio.map((f) => (
+                                    <FormatCard key={f.itag} format={f} onDownload={handleDownload} />
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+    </script>
+</body>
+</html>
